@@ -51,56 +51,55 @@ const normalizeUrl = (link) => {
 };
 
 /**
- * Get the LAST match for a regex pattern in HTML.
- * Facebook pages contain multiple video entries (related/promoted videos).
- * The target video is typically the LAST occurrence in the page HTML.
+ * Collect ALL matches for a regex pattern in HTML.
+ * Returns array of { url, index } objects.
  */
-const getLastMatch = (html, pattern) => {
-    const matches = [...html.matchAll(new RegExp(pattern, 'g'))];
-    if (matches.length > 0) {
-        return cleanUrl(matches[matches.length - 1][1]);
+const getAllMatches = (html, regex) => {
+    const results = [];
+    let match;
+    while ((match = regex.exec(html)) !== null) {
+        const cleaned = cleanUrl(match[1]);
+        if (cleaned) {
+            results.push({ url: cleaned, index: match.index });
+        }
     }
-    return null;
+    return results;
 };
 
 /**
- * Extract BOTH HD and SD video URLs from HTML using regex patterns.
+ * Extract BOTH HD and SD video URLs from HTML.
+ * 
+ * Strategy: Facebook pages embed multiple video objects (target + related/promoted).
+ * We collect ALL HD and SD URL occurrences, then pick the LAST pair — Facebook
+ * typically places the actual target video's data after related content.
+ * 
  * Returns { hdUrl, sdUrl } - either or both may be null.
- * Uses matchAll + last-match strategy to skip related/promoted video URLs.
  */
 const extractVideoUrlsFromHtml = (html) => {
-    let hdUrl = null;
-    let sdUrl = null;
-
-    // --- HD URL extraction (try multiple patterns) ---
-
-    // Pattern 1: playable_url_quality_hd (most common for HD)
-    hdUrl = getLastMatch(html, '"playable_url_quality_hd"\\s*:\\s*"([^"]+)"');
-
-    // Pattern 2: browser_native_hd_url (fallback)
-    if (!hdUrl) {
-        hdUrl = getLastMatch(html, '"browser_native_hd_url"\\s*:\\s*"([^"]+)"');
+    // --- Collect all HD URL matches ---
+    let allHd = getAllMatches(html, /"playable_url_quality_hd"\s*:\s*"([^"]+)"/g);
+    if (allHd.length === 0) {
+        allHd = getAllMatches(html, /"browser_native_hd_url"\s*:\s*"([^"]+)"/g);
+    }
+    if (allHd.length === 0) {
+        allHd = getAllMatches(html, /hd_src\s*:\s*"([^"]+)"/g);
     }
 
-    // Pattern 3: Legacy hd_src (for older pages)
-    if (!hdUrl) {
-        hdUrl = getLastMatch(html, 'hd_src\\s*:\\s*"([^"]+)"');
+    // --- Collect all SD URL matches ---
+    let allSd = getAllMatches(html, /"playable_url"\s*:\s*"([^"]+)"/g);
+    if (allSd.length === 0) {
+        allSd = getAllMatches(html, /"browser_native_sd_url"\s*:\s*"([^"]+)"/g);
+    }
+    if (allSd.length === 0) {
+        allSd = getAllMatches(html, /sd_src\s*:\s*"([^"]+)"/g);
     }
 
-    // --- SD URL extraction (try multiple patterns) ---
+    // Pick the LAST occurrence of each (target video is usually last)
+    const hdUrl = allHd.length > 0 ? allHd[allHd.length - 1].url : null;
+    const sdUrl = allSd.length > 0 ? allSd[allSd.length - 1].url : null;
 
-    // Pattern 1: playable_url (most common for SD) — but skip playable_url_quality_hd
-    sdUrl = getLastMatch(html, '"playable_url"\\s*:\\s*"([^"]+)"');
-
-    // Pattern 2: browser_native_sd_url
-    if (!sdUrl) {
-        sdUrl = getLastMatch(html, '"browser_native_sd_url"\\s*:\\s*"([^"]+)"');
-    }
-
-    // Pattern 3: Legacy sd_src
-    if (!sdUrl) {
-        sdUrl = getLastMatch(html, 'sd_src\\s*:\\s*"([^"]+)"');
-    }
+    // Log match counts for debugging
+    console.log(`   🔍 Found ${allHd.length} HD URLs, ${allSd.length} SD URLs in page`);
 
     return { hdUrl, sdUrl };
 };
