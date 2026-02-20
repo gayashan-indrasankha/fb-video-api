@@ -51,57 +51,72 @@ const normalizeUrl = (link) => {
 };
 
 /**
- * Collect ALL matches for a regex pattern in HTML.
- * Returns array of { url, index } objects.
+ * Extract BOTH HD and SD video URLs from HTML using regex patterns
+ * Returns: { hd: string|null, sd: string|null }
  */
-const getAllMatches = (html, regex) => {
-    const results = [];
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-        const cleaned = cleanUrl(match[1]);
-        if (cleaned) {
-            results.push({ url: cleaned, index: match.index });
+const extractVideoUrlFromHtml = (html) => {
+    let hdUrl = null;
+    let sdUrl = null;
+
+    // ===== HD URL EXTRACTION =====
+
+    // Pattern 1: playable_url_quality_hd (best HD source)
+    const playableUrlHdMatch = html.match(/"playable_url_quality_hd"\s*:\s*"([^"]+)"/);
+    if (playableUrlHdMatch) {
+        hdUrl = cleanUrl(playableUrlHdMatch[1]);
+    }
+
+    // Pattern 2: browser_native_hd_url (fallback HD)
+    if (!hdUrl) {
+        const browserNativeHdMatch = html.match(/"browser_native_hd_url"\s*:\s*"([^"]+)"/);
+        if (browserNativeHdMatch) {
+            hdUrl = cleanUrl(browserNativeHdMatch[1]);
         }
     }
-    return results;
-};
 
-/**
- * Extract BOTH HD and SD video URLs from HTML.
- * 
- * Strategy: Facebook pages embed multiple video objects (target + related/promoted).
- * We collect ALL HD and SD URL occurrences, then pick the LAST pair — Facebook
- * typically places the actual target video's data after related content.
- * 
- * Returns { hdUrl, sdUrl } - either or both may be null.
- */
-const extractVideoUrlsFromHtml = (html) => {
-    // --- Collect all HD URL matches ---
-    let allHd = getAllMatches(html, /"playable_url_quality_hd"\s*:\s*"([^"]+)"/g);
-    if (allHd.length === 0) {
-        allHd = getAllMatches(html, /"browser_native_hd_url"\s*:\s*"([^"]+)"/g);
-    }
-    if (allHd.length === 0) {
-        allHd = getAllMatches(html, /hd_src\s*:\s*"([^"]+)"/g);
+    // Pattern 3: Legacy hd_src
+    if (!hdUrl) {
+        const hdSrcMatch = html.match(/hd_src\s*:\s*"([^"]+)"/);
+        if (hdSrcMatch) {
+            hdUrl = cleanUrl(hdSrcMatch[1]);
+        }
     }
 
-    // --- Collect all SD URL matches ---
-    let allSd = getAllMatches(html, /"playable_url"\s*:\s*"([^"]+)"/g);
-    if (allSd.length === 0) {
-        allSd = getAllMatches(html, /"browser_native_sd_url"\s*:\s*"([^"]+)"/g);
+    // ===== SD URL EXTRACTION =====
+
+    // Pattern 1: playable_url (standard SD)
+    const sdMatch = html.match(/"playable_url"\s*:\s*"([^"]+)"/);
+    if (sdMatch) {
+        sdUrl = cleanUrl(sdMatch[1]);
     }
-    if (allSd.length === 0) {
-        allSd = getAllMatches(html, /sd_src\s*:\s*"([^"]+)"/g);
+
+    // Pattern 2: browser_native_sd_url (fallback SD)
+    if (!sdUrl) {
+        const browserNativeSdMatch = html.match(/"browser_native_sd_url"\s*:\s*"([^"]+)"/);
+        if (browserNativeSdMatch) {
+            sdUrl = cleanUrl(browserNativeSdMatch[1]);
+        }
     }
 
-    // Pick the LAST occurrence of each (target video is usually last)
-    const hdUrl = allHd.length > 0 ? allHd[allHd.length - 1].url : null;
-    const sdUrl = allSd.length > 0 ? allSd[allSd.length - 1].url : null;
+    // Pattern 3: Legacy sd_src
+    if (!sdUrl) {
+        const sdSrcMatch = html.match(/sd_src\s*:\s*"([^"]+)"/);
+        if (sdSrcMatch) {
+            sdUrl = cleanUrl(sdSrcMatch[1]);
+        }
+    }
 
-    // Log match counts for debugging
-    console.log(`   🔍 Found ${allHd.length} HD URLs, ${allSd.length} SD URLs in page`);
+    // If no SD found but HD exists, use HD as fallback for SD
+    if (!sdUrl && hdUrl) {
+        sdUrl = hdUrl;
+    }
 
-    return { hdUrl, sdUrl };
+    // If no HD found but SD exists, use SD as fallback for HD
+    if (!hdUrl && sdUrl) {
+        hdUrl = sdUrl;
+    }
+
+    return { hd: hdUrl, sd: sdUrl };
 };
 
 /**
@@ -122,10 +137,10 @@ const extractViaHttp = async (videoUrl) => {
         timeout: { request: HTTP_TIMEOUT }
     });
 
-    const { hdUrl, sdUrl } = extractVideoUrlsFromHtml(response.body);
+    const urls = extractVideoUrlFromHtml(response.body);
 
-    if (hdUrl || sdUrl) {
-        return { success: true, hdUrl, sdUrl, method: 'http' };
+    if (urls.hd || urls.sd) {
+        return { success: true, hd: urls.hd, sd: urls.sd, method: 'http' };
     }
 
     return null;
@@ -194,10 +209,10 @@ const extractViaPuppeteer = async (videoUrl) => {
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const html = await page.content();
-        const { hdUrl, sdUrl } = extractVideoUrlsFromHtml(html);
+        const urls = extractVideoUrlFromHtml(html);
 
-        if (hdUrl || sdUrl) {
-            return { success: true, hdUrl, sdUrl, method: 'puppeteer' };
+        if (urls.hd || urls.sd) {
+            return { success: true, hd: urls.hd, sd: urls.sd, method: 'puppeteer' };
         }
 
         return null;
@@ -220,7 +235,7 @@ app.get('/health', (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        version: '2.0.0'
+        version: '1.0.0'
     });
 });
 
@@ -230,10 +245,10 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         name: 'FB Video CDN Extractor API',
-        version: '2.0.0',
+        version: '1.0.0',
         endpoints: {
             'GET /health': 'Health check',
-            'GET /api/extract?url=<FB_URL>': 'Extract CDN URL from Facebook video (returns hd_url + sd_url)'
+            'GET /api/extract?url=<FB_URL>': 'Extract CDN URL from Facebook video'
         }
     });
 });
@@ -241,7 +256,6 @@ app.get('/', (req, res) => {
 /**
  * Main extraction endpoint
  * Uses HTTP-first approach with Puppeteer fallback
- * Returns separate hd_url and sd_url fields
  */
 app.get('/api/extract', async (req, res) => {
     const videoUrl = req.query.url;
@@ -281,13 +295,11 @@ app.get('/api/extract', async (req, res) => {
 
         if (result) {
             console.log(`✅ Success via ${result.method} in ${duration}ms`);
-            console.log(`   HD: ${result.hdUrl ? 'Yes' : 'No'}, SD: ${result.sdUrl ? 'Yes' : 'No'}`);
+            console.log(`   HD: ${result.hd ? 'Yes' : 'No'}, SD: ${result.sd ? 'Yes' : 'No'}`);
             return res.json({
                 success: true,
-                hd_url: result.hdUrl || null,
-                sd_url: result.sdUrl || null,
-                // Backward compatible: url = HD preferred, SD fallback
-                url: result.hdUrl || result.sdUrl,
+                hd_url: result.hd,
+                sd_url: result.sd,
                 method: result.method,
                 duration_ms: duration
             });
