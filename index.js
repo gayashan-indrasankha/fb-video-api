@@ -51,72 +51,58 @@ const normalizeUrl = (link) => {
 };
 
 /**
- * Extract BOTH HD and SD video URLs from HTML using regex patterns
- * Returns: { hd: string|null, sd: string|null }
+ * Get the LAST match for a regex pattern in HTML.
+ * Facebook pages contain multiple video entries (related/promoted videos).
+ * The target video is typically the LAST occurrence in the page HTML.
  */
-const extractVideoUrlFromHtml = (html) => {
+const getLastMatch = (html, pattern) => {
+    const matches = [...html.matchAll(new RegExp(pattern, 'g'))];
+    if (matches.length > 0) {
+        return cleanUrl(matches[matches.length - 1][1]);
+    }
+    return null;
+};
+
+/**
+ * Extract BOTH HD and SD video URLs from HTML using regex patterns.
+ * Returns { hdUrl, sdUrl } - either or both may be null.
+ * Uses matchAll + last-match strategy to skip related/promoted video URLs.
+ */
+const extractVideoUrlsFromHtml = (html) => {
     let hdUrl = null;
     let sdUrl = null;
 
-    // ===== HD URL EXTRACTION =====
+    // --- HD URL extraction (try multiple patterns) ---
 
-    // Pattern 1: playable_url_quality_hd (best HD source)
-    const playableUrlHdMatch = html.match(/"playable_url_quality_hd"\s*:\s*"([^"]+)"/);
-    if (playableUrlHdMatch) {
-        hdUrl = cleanUrl(playableUrlHdMatch[1]);
-    }
+    // Pattern 1: playable_url_quality_hd (most common for HD)
+    hdUrl = getLastMatch(html, '"playable_url_quality_hd"\\s*:\\s*"([^"]+)"');
 
-    // Pattern 2: browser_native_hd_url (fallback HD)
+    // Pattern 2: browser_native_hd_url (fallback)
     if (!hdUrl) {
-        const browserNativeHdMatch = html.match(/"browser_native_hd_url"\s*:\s*"([^"]+)"/);
-        if (browserNativeHdMatch) {
-            hdUrl = cleanUrl(browserNativeHdMatch[1]);
-        }
+        hdUrl = getLastMatch(html, '"browser_native_hd_url"\\s*:\\s*"([^"]+)"');
     }
 
-    // Pattern 3: Legacy hd_src
+    // Pattern 3: Legacy hd_src (for older pages)
     if (!hdUrl) {
-        const hdSrcMatch = html.match(/hd_src\s*:\s*"([^"]+)"/);
-        if (hdSrcMatch) {
-            hdUrl = cleanUrl(hdSrcMatch[1]);
-        }
+        hdUrl = getLastMatch(html, 'hd_src\\s*:\\s*"([^"]+)"');
     }
 
-    // ===== SD URL EXTRACTION =====
+    // --- SD URL extraction (try multiple patterns) ---
 
-    // Pattern 1: playable_url (standard SD)
-    const sdMatch = html.match(/"playable_url"\s*:\s*"([^"]+)"/);
-    if (sdMatch) {
-        sdUrl = cleanUrl(sdMatch[1]);
-    }
+    // Pattern 1: playable_url (most common for SD) — but skip playable_url_quality_hd
+    sdUrl = getLastMatch(html, '"playable_url"\\s*:\\s*"([^"]+)"');
 
-    // Pattern 2: browser_native_sd_url (fallback SD)
+    // Pattern 2: browser_native_sd_url
     if (!sdUrl) {
-        const browserNativeSdMatch = html.match(/"browser_native_sd_url"\s*:\s*"([^"]+)"/);
-        if (browserNativeSdMatch) {
-            sdUrl = cleanUrl(browserNativeSdMatch[1]);
-        }
+        sdUrl = getLastMatch(html, '"browser_native_sd_url"\\s*:\\s*"([^"]+)"');
     }
 
     // Pattern 3: Legacy sd_src
     if (!sdUrl) {
-        const sdSrcMatch = html.match(/sd_src\s*:\s*"([^"]+)"/);
-        if (sdSrcMatch) {
-            sdUrl = cleanUrl(sdSrcMatch[1]);
-        }
+        sdUrl = getLastMatch(html, 'sd_src\\s*:\\s*"([^"]+)"');
     }
 
-    // If no SD found but HD exists, use HD as fallback for SD
-    if (!sdUrl && hdUrl) {
-        sdUrl = hdUrl;
-    }
-
-    // If no HD found but SD exists, use SD as fallback for HD
-    if (!hdUrl && sdUrl) {
-        hdUrl = sdUrl;
-    }
-
-    return { hd: hdUrl, sd: sdUrl };
+    return { hdUrl, sdUrl };
 };
 
 /**
@@ -137,10 +123,10 @@ const extractViaHttp = async (videoUrl) => {
         timeout: { request: HTTP_TIMEOUT }
     });
 
-    const urls = extractVideoUrlFromHtml(response.body);
+    const { hdUrl, sdUrl } = extractVideoUrlsFromHtml(response.body);
 
-    if (urls.hd || urls.sd) {
-        return { success: true, hd: urls.hd, sd: urls.sd, method: 'http' };
+    if (hdUrl || sdUrl) {
+        return { success: true, hdUrl, sdUrl, method: 'http' };
     }
 
     return null;
@@ -209,10 +195,10 @@ const extractViaPuppeteer = async (videoUrl) => {
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const html = await page.content();
-        const urls = extractVideoUrlFromHtml(html);
+        const { hdUrl, sdUrl } = extractVideoUrlsFromHtml(html);
 
-        if (urls.hd || urls.sd) {
-            return { success: true, hd: urls.hd, sd: urls.sd, method: 'puppeteer' };
+        if (hdUrl || sdUrl) {
+            return { success: true, hdUrl, sdUrl, method: 'puppeteer' };
         }
 
         return null;
@@ -235,7 +221,7 @@ app.get('/health', (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        version: '1.0.0'
+        version: '2.0.0'
     });
 });
 
@@ -245,10 +231,10 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         name: 'FB Video CDN Extractor API',
-        version: '1.0.0',
+        version: '2.0.0',
         endpoints: {
             'GET /health': 'Health check',
-            'GET /api/extract?url=<FB_URL>': 'Extract CDN URL from Facebook video'
+            'GET /api/extract?url=<FB_URL>': 'Extract CDN URL from Facebook video (returns hd_url + sd_url)'
         }
     });
 });
@@ -256,6 +242,7 @@ app.get('/', (req, res) => {
 /**
  * Main extraction endpoint
  * Uses HTTP-first approach with Puppeteer fallback
+ * Returns separate hd_url and sd_url fields
  */
 app.get('/api/extract', async (req, res) => {
     const videoUrl = req.query.url;
@@ -295,11 +282,13 @@ app.get('/api/extract', async (req, res) => {
 
         if (result) {
             console.log(`✅ Success via ${result.method} in ${duration}ms`);
-            console.log(`   HD: ${result.hd ? 'Yes' : 'No'}, SD: ${result.sd ? 'Yes' : 'No'}`);
+            console.log(`   HD: ${result.hdUrl ? 'Yes' : 'No'}, SD: ${result.sdUrl ? 'Yes' : 'No'}`);
             return res.json({
                 success: true,
-                hd_url: result.hd,
-                sd_url: result.sd,
+                hd_url: result.hdUrl || null,
+                sd_url: result.sdUrl || null,
+                // Backward compatible: url = HD preferred, SD fallback
+                url: result.hdUrl || result.sdUrl,
                 method: result.method,
                 duration_ms: duration
             });
